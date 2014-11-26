@@ -6,6 +6,10 @@ but this was based on php, so I rewrote it for perl usage.
 
 How to use it, one need at least the mysql client plus development files (dyn libs)
 
+I basically created this scripts because I wasnt aware that there are tools out there such as mongify
+when I was aware later that there are tools such as mongify I was traveling without internet so I wrote the
+embedd script because I needed to embedd data in a hurry at that time :)
+
 * install mysql client and dev files for your OS
 * install perl mysql functionalities (DB::mysql) using cpan
 
