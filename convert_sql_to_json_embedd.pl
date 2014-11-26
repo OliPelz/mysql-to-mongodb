@@ -5,26 +5,54 @@ use JSON;
 use strict;
 use warnings;
 
-#usage ./convert_sql_to_mongo_embed.pl <db user> <db name> <dp passwd> <db_host> <db_port> <output file> <sql statement> [<relation embed type><id_connect_a_b_merged_with _to_> <sql_to_embed> <id_connect_a_b> <sql_to_embed> ....]
-#e.g. 
+#usage ./convert_sql_to_mongo_embed.pl <db user> <db name> <dp passwd> <db_host> <db_port> <output file> <input file>
+
+
 
 #perl ~/Git/mysql-to-mongodb/convert_sql_to_json_embedd.pl root genome_rnai_universal_v14_tuning \
 #<secretPassword> \
 #localhost \
 #3306 \
 #`date +%Y-%m-%d`/phenotypeNamesOrganism.json \
-#"SELECT E.ExperimentId as embedExperiment, E.OrganismId as embedOrgId, P.name as phenoName, O.organismName as organismName \
+#myrules.conf
+
+
+#the input format has the following simple format:
+
+#[unique identifier e.g. single alphabet to identify sql table]:sql query to produce a table surrounded by double quotes
+#[unique identifier e.g. single alphabet to identify sql table]:sql query to produce a table surrounded by double quotes
+#[unique identifier e.g. single alphabet to identify sql table]:sql query to produce a table surrounded by double quotes
+#[...]
+#
+#[relationship rule 1 for embedding data: oneToMany/oneToOne]
+#[unique identifier rule 1 of sql table ]:id to join to relationship, this table will be used to embed the other one
+#[unique identifier rule 1 of sql table]:id to join to relationship, this table will be used to ENMBED INTO the other one
+#[rule 1 of name of the new column on the table to embed the other one in]
+#
+#[...rule blocks can be repeated n times]
+#
+#example for a config file:
+#
+#A:"SELECT E.ExperimentId as experiment, P.name as phenoName, O.organismName as organismName \
 #FROM OPTIMIZED_PhenotypeSearch P \
 #inner join OPTIMIZED_PhenotypeSearchExperiment E \
 #on P.id = E.PhenoSearchId \
 #inner join Organism O \
 #on E.OrganismId = O.id \
-#order by P.name" \
-#embedExperiment_id \
-#"select * from Experiment \
+#order by P.name"\
+#:"select * from NewExternalExperiment"
+#C:"SELECT * from OPTIMIZED_PhenotypeSearchPhenotypes" \
+
 #oneToMany \
-#embedOrgId_to_id \
-#select * from Organism
+#A:experiment \
+#B:id \
+#experiment
+
+#oneToMany \
+#B:id \
+#C:expId
+#phenotypeGroups
+
 
 
 #connect to database
@@ -45,62 +73,97 @@ $sth = $dbh->prepare("SET FOREIGN_KEY_CHECKS=0")
 or closeDBAndDie("Couldn't prepare statement");
 $sth->execute() or closeDBAndDie("Couldn't connect to database: ");
 
-$sth = $dbh->prepare($sql_string) or closeDBAndDie("Couldn't prepare statement");
-$sth->execute() or closeDBAndDie("Couldn't connect to database: ");
-my @result_rows;
-while (my $hash_ref = $sth->fetchrow_hashref) { 
-    push @result_rows, $hash_ref;
-}
-if(scalar @ARGV > 6) {
-	for(my $i = 7; $i < scalar @ARGV; $i+=3) {
-		die "must define an sql statement if additional embedding parameters are defined" 
-		   if(!defined($ARGV[$i+1])|| $ARGV[$i+1] eq "" || $ARGV[$i+2] eq "");
-		my $relation = $ARGV[$i];
-		my $leftId;
-		my $rightId;
-		if($ARGV[$i+1] =~ /(\w+)_to_(\w+)/) {
-		  $leftId = $1;
-          $rightId = $2;
- 		}
-		else {
-			die "parameter _to_ not in the right format";
-		}
 
-		my $sql_string         = $ARGV[$i+2];
-		$sth = $dbh->prepare($sql_string) or closeDBAndDie("Couldn't prepare statement");
-		$sth->execute() or closeDBAndDie("Couldn't connect to database: ");
-		my @embed_table;
-		while (my $hash_ref = $sth->fetchrow_hashref) { 
-		    push @embed_table, $hash_ref;
-		}
-		#now make the actual embed
-		foreach my $left_row (@result_rows) {
-			my $found = 0;
-			#we need to backup this
-			my $left_contentId = $left_row->{$leftId};
-			foreach my $right_row (@embed_table) {
-				if($left_contentId  eq $right_row->{$rightId}) {
-					if($relation eq "oneToOne") {
-					   $left_row->{$leftId} = $right_row;
-					}
-					elsif ($relation eq "oneToMany") { 
-					   if (ref $left_row->{$leftId} ne 'ARRAY') {
-						   $left_row->{$leftId} = [];
-					   }  
- 					   push @{$left_row->{$leftId}}, $right_row; 
-					}
-					$found = 1;
-				}
+open(CONFIGFILE, $ARGV[6]) || die "cannot open input file";
+my $line;
+my %sql;
+my %embed;
+my $blockCount = 0; # counter for blocks  (blocks are separated by newline)
+my $embedCount = 0;
+#read in config file
+while($line = <CONFIGFILE>) {
+	if($line =~ /^\n$/) {
+		$blockCount++;
+		next;
+	}
+	$line =~ s/\n//g;
+	# sql block
+	if($blockCount == 0) {  
+		if($line =~ /^(\w+):"([^"]+)"$/) {
+			my $id= $1;
+			my $sql_statement = $2;
+			if(defined($sql{$id}{"query"})) {
+				die "unique ids are non-unique, there are several sql lines with same identifier : $id";
 			}
-			if(!$found) {
-				$left_row->{$leftId} = undef;
-				print STDERR "field ".$left_row->{$leftId}." with id $leftId not found when embedding\n";
-			}
+			$sql{$id}{"query"} = $sql_statement;
 		}
+	}
+	#embedd block
+	elsif($blockCount > 0) {
+		if($line =~ /^(\w+):([_\w]+)$/ && !defined($embed{$embedCount}{"embed_to"})) {
+			$embed{$embedCount}{"embed_to_id"} = $1;
+			$embed{$embedCount}{"embed_to_col"} = $1;
+		}
+		#embed_to always comes before embed_from
+		elsif($line =~ /^(\w+):([_\w]+)$/ && defined($embed{$embedCount}{"embed_to"})) {
+			$embed{$embedCount}{"embed_from_id"} = $1;
+			$embed{$embedCount}{"embed_from_col"} = $2;
+		}
+		#TODO: manyToMany not implemented yet
+		elsif($line =~ /^(oneToOne|oneToMany|manyToMany)$/) {
+			$embed{$embedCount}{"relation"} = $1;
+		}
+		elsif($line =~ /^([\w_]+)$/) {
+			$embed{$embedCount}{"columnName"} = $1;
+			$embedCount++;
+		}
+	}
+}
+close CONFIGFILE;
+
+#next query all data tables from sql
+foreach my $id (keys %sql) {
+	my $sql_string = $sql{$id}{"query"};
+	$sth = $dbh->prepare($sql_string) or closeDBAndDie("Couldn't prepare statement");
+	$sth->execute() or closeDBAndDie("Couldn't connect to database: ");
+	my @table_data;
+	while (my $hash_ref = $sth->fetchrow_hashref) { 
+	    push @table_data, $hash_ref;
+	}
+	$sql{$id}{"data"} = \@table_data;
+}
+#last embed stuff (sort i use for better debugging)
+foreach my $cnt (sort keys %embed) {
+	#xtract needed data
+	my $relation = $embed{$cnt}{"relation"};
+	my $colName = $embed{$cnt}{"columnName"};
+	my $embed_to_id = $embed{$cnt}{"embed_to"};
+	my $embed_to_col = $embed{$cnt}{"embed_to"}{$embed_to_id};
+	my $embed_from_id = $embed{$cnt}{"embed_from"};
+	my $embed_from_col = $embed{$cnt}{"embed_from"}{$embed_from_id};
+	
+	#see if we can "join" the tables for connection/embedding
+	my $embed_container;
+	foreach my $to (@{$sql{$embed_to_id}{"data"}}) {
+		foreach my $from (@{$sql{$embed_from_id}{"data"}}) {
+			if($to->{$embed_to_col} eq $from->{$embed_from_col}) {
+				if($relation eq "oneToOne") { #oneToOne is scalar
+				    $embed_container = $from;
+			    }
+			    elsif($relation eq "oneToMany"){ #oneToMany is array
+			       push @{$embed_container}, $from;
+		        } 
+	        } 
+       }
+#after all is collected in the embed_container we have to embedd it actually in the colname 
+    $to->{$colName} = $embed_container;
     }
 }
 
-print $out_handle to_json(\@result_rows);
+foreach my $id (keys %sql) {
+	my $data = $sql{$id};
+	print $out_handle $id.":".to_json($data);
+}
 
 
 #while (my @arr = $sth->fetchrow_array) {
