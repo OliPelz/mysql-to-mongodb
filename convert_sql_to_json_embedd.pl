@@ -4,6 +4,7 @@ use DBD::mysql;
 use JSON;
 use strict;
 use warnings;
+use List::MoreUtils qw(uniq);
 
 #usage ./convert_sql_to_mongo_embed.pl <db user> <db name> <dp passwd> <db_host> <db_port> <input file> <output dir>
 
@@ -112,8 +113,12 @@ while($line = <CONFIGFILE>) {
 		elsif($line =~ /^(oneToOne|oneToMany|manyToMany)$/) {
 			$embed{$embedCount}{"relation"} = $1;
 		}
-		elsif($line =~ /^([\w_]+)$/) {
+		elsif($line =~ /^EMBED_COL=(.*)$/) {
 			$embed{$embedCount}{"columnName"} = $1;
+			$embedCount++;
+		}
+		elsif($line =~ /^FILTERED_OUT_COLS=(.*)$/) {
+			$embed{$embedCount}{"other_columnNames"} = $1;
 			$embedCount++;
 		}
 	}
@@ -131,16 +136,20 @@ foreach my $id (keys %sql) {
 	}
 	$sql{$id}{"data"} = \@table_data;
 }
-#last embed stuff (sort i use for better debugging)
-my %embed_hash; # keeps information about embedding while we loop the hash
+
+
+
 foreach my $cnt (sort keys %embed) {
 	#xtract needed data
-	my $relation = $embed{$cnt}{"relation"};
-	my $colName = $embed{$cnt}{"columnName"};
-	my $embed_to_id = $embed{$cnt}{"embed_to_id"};
-	my $embed_to_col = $embed{$cnt}{"embed_to_col"};
-	my $embed_from_id = $embed{$cnt}{"embed_from_id"};
-	my $embed_from_col = $embed{$cnt}{"embed_from_col"};
+	my $relation        = $embed{$cnt}{"relation"};
+	my $colName         = $embed{$cnt}{"columnName"};
+	my $other_colNames  = $embed{$cnt}{"other_columnNames"};
+	my $embed_to_id     = $embed{$cnt}{"embed_to_id"};
+	my $embed_to_col    = $embed{$cnt}{"embed_to_col"};
+	my $embed_from_id   = $embed{$cnt}{"embed_from_id"};
+	my $embed_from_col  = $embed{$cnt}{"embed_from_col"};
+	my %embed_to_unique;
+	my %embed_from_unique;
 	
 	#see if we can "join" the tables for connection/embedding
 	foreach my $to (@{$sql{$embed_to_id}{"data"}}) {
@@ -155,20 +164,47 @@ foreach my $cnt (sort keys %embed) {
 		        } 
 	        } 
        }
-#after all is collected in the embed_container we have to embedd it actually in the colname 
-    $to->{$colName} = $embed_container;
-	print "";
-    }
+	   my %to_new;
+	   my @ar;
+	   #filter the output "to" hash
+	   if($other_colNames eq "*") {
+		   @ar = keys %$to;
+	   } 
+	   else {
+		   my @ar = split(",", $other_colNames );
+	   }
+	   foreach my $myKey (@ar) {
+		   #skip the colnam
+		   #if($myKeq ne $colName) {
+		   #	
+		   #}
+		   $to_new = $t->{$myKey};
+	   }
+	   
+       #store the embedded information in a new hash
+	   # $embed{$cnt}{"embed_container"} = $embed_container;
+   }
 }
 
+#now output embed information
+#foreach my $cnt (sort keys %embed) {
+#    my $embed_container = $embed{$cnt}{"embed_container"};	
+#	
+#}
 
-foreach my $id (sort keys %sql) {
-	my $data = $sql{$id}{"data"};
-	my $file = $ARGV[6]."/".$id.".json";
-	open(OUT, ">", $file) || die "cannot open file to write $file";
-	print OUT to_json($data);
-	close(OUT);
-	print STDOUT "wrote output file $file\n";
+
+
+
+
+
+
+foreach my $id (sort keys %iterator) {
+	#my $data = $sql{$id}{"data"};
+	#my $file = $ARGV[6]."/".$id.".json";
+	#open(OUT, ">", $file) || die "cannot open file to write $file";
+	#print OUT to_json($data);
+	#close(OUT);
+	#print STDOUT "wrote output file $file\n";
 }
 
 
