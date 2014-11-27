@@ -5,7 +5,7 @@ use JSON;
 use strict;
 use warnings;
 
-#usage ./convert_sql_to_mongo_embed.pl <db user> <db name> <dp passwd> <db_host> <db_port> <output file> <input file>
+#usage ./convert_sql_to_mongo_embed.pl <db user> <db name> <dp passwd> <db_host> <db_port> <input file> <output dir>
 
 
 
@@ -13,11 +13,11 @@ use warnings;
 #<secretPassword> \
 #localhost \
 #3306 \
-#`date +%Y-%m-%d`/phenotypeNamesOrganism.json \
 #myrules.conf
+#`date +%Y-%m-%d`
 
 
-#the input format has the following simple format:
+#for the input file the input format has the following simple format:
 
 #[unique identifier e.g. single alphabet to identify sql table]:sql query to produce a table surrounded by double quotes
 #[unique identifier e.g. single alphabet to identify sql table]:sql query to produce a table surrounded by double quotes
@@ -60,10 +60,7 @@ my ($db_user, $db_name, $db_pass, $db_host, $db_port) = ($ARGV[0], $ARGV[1],$ARG
 my $dbh = DBI->connect("DBI:mysql:$db_name;host=$db_host;port=$db_port","$db_user","$db_pass")
 or closeDBAndDie("Couldn't connect to database: ");
 
-my $sql_string = $ARGV[6];
-
 my $out_handle;
-open($out_handle, ">", $ARGV[5]) || die "cannot open output file ".$ARGV[5];
 
 ###set encoding 'n stuff
 my $sth = $dbh->prepare("SET NAMES 'utf8'")
@@ -74,7 +71,9 @@ or closeDBAndDie("Couldn't prepare statement");
 $sth->execute() or closeDBAndDie("Couldn't connect to database: ");
 
 
-open(CONFIGFILE, $ARGV[6]) || die "cannot open input file";
+open(CONFIGFILE, $ARGV[5]) || die "cannot open input file";
+
+
 my $line;
 my %sql;
 my %embed;
@@ -100,12 +99,12 @@ while($line = <CONFIGFILE>) {
 	}
 	#embedd block
 	elsif($blockCount > 0) {
-		if($line =~ /^(\w+):([_\w]+)$/ && !defined($embed{$embedCount}{"embed_to"})) {
+		if($line =~ /^(\w+):([_\w]+)$/ && !defined($embed{$embedCount}{"embed_to_id"})) {
 			$embed{$embedCount}{"embed_to_id"} = $1;
-			$embed{$embedCount}{"embed_to_col"} = $1;
+			$embed{$embedCount}{"embed_to_col"} = $2;
 		}
 		#embed_to always comes before embed_from
-		elsif($line =~ /^(\w+):([_\w]+)$/ && defined($embed{$embedCount}{"embed_to"})) {
+		elsif($line =~ /^(\w+):([_\w]+)$/ && defined($embed{$embedCount}{"embed_to_id"})) {
 			$embed{$embedCount}{"embed_from_id"} = $1;
 			$embed{$embedCount}{"embed_from_col"} = $2;
 		}
@@ -133,18 +132,19 @@ foreach my $id (keys %sql) {
 	$sql{$id}{"data"} = \@table_data;
 }
 #last embed stuff (sort i use for better debugging)
+my %embed_hash; # keeps information about embedding while we loop the hash
 foreach my $cnt (sort keys %embed) {
 	#xtract needed data
 	my $relation = $embed{$cnt}{"relation"};
 	my $colName = $embed{$cnt}{"columnName"};
-	my $embed_to_id = $embed{$cnt}{"embed_to"};
-	my $embed_to_col = $embed{$cnt}{"embed_to"}{$embed_to_id};
-	my $embed_from_id = $embed{$cnt}{"embed_from"};
-	my $embed_from_col = $embed{$cnt}{"embed_from"}{$embed_from_id};
+	my $embed_to_id = $embed{$cnt}{"embed_to_id"};
+	my $embed_to_col = $embed{$cnt}{"embed_to_col"};
+	my $embed_from_id = $embed{$cnt}{"embed_from_id"};
+	my $embed_from_col = $embed{$cnt}{"embed_from_col"};
 	
 	#see if we can "join" the tables for connection/embedding
-	my $embed_container;
 	foreach my $to (@{$sql{$embed_to_id}{"data"}}) {
+		my $embed_container = undef;
 		foreach my $from (@{$sql{$embed_from_id}{"data"}}) {
 			if($to->{$embed_to_col} eq $from->{$embed_from_col}) {
 				if($relation eq "oneToOne") { #oneToOne is scalar
@@ -157,12 +157,18 @@ foreach my $cnt (sort keys %embed) {
        }
 #after all is collected in the embed_container we have to embedd it actually in the colname 
     $to->{$colName} = $embed_container;
+	print "";
     }
 }
 
-foreach my $id (keys %sql) {
-	my $data = $sql{$id};
-	print $out_handle $id.":".to_json($data);
+
+foreach my $id (sort keys %sql) {
+	my $data = $sql{$id}{"data"};
+	my $file = $ARGV[6]."/".$id.".json";
+	open(OUT, ">", $file) || die "cannot open file to write $file";
+	print OUT to_json($data);
+	close(OUT);
+	print STDOUT "wrote output file $file\n";
 }
 
 
@@ -170,10 +176,7 @@ foreach my $id (keys %sql) {
 #    print $out_handle to_json(\@arr);
 #}
 
-
-
 $dbh->disconnect;
-close $out_handle;
 
 
 
