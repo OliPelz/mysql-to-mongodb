@@ -118,6 +118,7 @@ while($line = <CONFIGFILE>) {
 	}
 }
 close CONFIGFILE;
+die "no sql statements could be read from the cfg fie" if(scalar keys %sql == 0);
 
 #next: query all table information from sql database and put in datastructure
 foreach my $table_id (keys %sql) {
