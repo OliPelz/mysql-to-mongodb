@@ -13,7 +13,7 @@ my $linkId = "__Link_Id__".time;
 #usage ./convert_sql_to_mongo_embed.pl <db user> <db name> <dp passwd> <db_host> <db_port> <input file> <output dir>
 
 
-
+#TODO: This instruction here is deprecated
 #perl ~/Git/mysql-to-mongodb/convert_sql_to_json_embedd.pl root genome_rnai_universal_v14_tuning \
 #<secretPassword> \
 #localhost \
@@ -199,9 +199,14 @@ foreach my $relationCount (sort keys %{$rule{"join"}}) {
 				# embed the data in our filtered datastructure
 				my $to_filt   = $sqlDataFiltered{$to_id}{$to_row->{$linkId}};
 				my $from_filt = $sqlDataFiltered{$from_id}{$from_row->{$linkId}};
+				
 				#the actual embed line. embed the data to the column named $embedCol
-				$to_filt->{$embedCol} = $from_filt;
-				print "";
+				if($relation eq "oneToOne") {
+				   $to_filt->{$embedCol} = $from_filt;
+			    }
+				elsif($relation eq "oneToMany") {  #make array
+					push @{$to_filt->{$embedCol}}, $from_filt;
+				}
 			}
 		}
 	}
