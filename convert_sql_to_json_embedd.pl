@@ -4,6 +4,11 @@ use DBD::mysql;
 use JSON;
 use strict;
 use warnings;
+use Data::Dumper;
+
+# we generate a column in every data table, we need to make it unique by using time
+# because it must not be available as a column in the original sql table
+my $linkId = "__Link_Id__".time;
 
 #usage ./convert_sql_to_mongo_embed.pl <db user> <db name> <dp passwd> <db_host> <db_port> <input file> <output dir>
 
@@ -60,7 +65,10 @@ my ($db_user, $db_name, $db_pass, $db_host, $db_port) = ($ARGV[0], $ARGV[1],$ARG
 my $dbh = DBI->connect("DBI:mysql:$db_name;host=$db_host;port=$db_port","$db_user","$db_pass")
 or closeDBAndDie("Couldn't connect to database: ");
 
-my $out_handle;
+my $outputPath = $ARGV[6] || die "no output path is given as parameter";
+if($outputPath =~ /([^\/])$/) {# append trailing slash / if not set
+   $outputPath.="/";
+} 
 
 ###set encoding 'n stuff
 my $sth = $dbh->prepare("SET NAMES 'utf8'")
@@ -79,16 +87,10 @@ my %sql;
 my %rule;
 my $blockCount = 0;
 my $relationCount = 0; 
-my $ruleCount = 0;
 #first: read in config file
 while($line = <CONFIGFILE>) {
 	if($line =~ /^\n$/) {
 		$blockCount++;
-		$relationCount = 0;
-		#dont start until first rule block has been read in
-		if(defined($rule{$ruleCount}{"filter"})) {
-			$ruleCount++;
-		}
 		next;
 	}
 	$line =~ s/\n//g;
@@ -106,79 +108,120 @@ while($line = <CONFIGFILE>) {
 	#embedd block
 	elsif($blockCount > 0) {
 		if($line =~ /^(oneToOne|oneToMany|manyToMany),(\w+):(\w+),(\w+):(\w+),(\w+)$/) {
-			$rule{$ruleCount}{"relation"}{$relationCount} = $1;
-			$rule{$ruleCount}{"to_id"}{$relationCount} = $2;
-			$rule{$ruleCount}{"to_join"}{$relationCount} = $2;
-			$rule{$ruleCount}{"from_id"}{$relationCount} = $3;
-			$rule{$ruleCount}{"from_join"}{$relationCount} = $3;
-			$rule{$ruleCount}{"embedCol"}{$relationCount} = $4;	
+			$rule{"join"}{$relationCount} = [$1,$2,$3,$4,$5,$6];
 			$relationCount++;
 		}
 
-		if($line =~ /^(\w+)=([_\w]+)$/) {
-			$rule{$ruleCount}{"colFilters"}{$1} = $2;
+		if($line =~ /^(\w+)=([_\w\*]+)$/) {
+			$rule{"colFilters"}{$1} = $2;
 		}
 	}
 }
 close CONFIGFILE;
 
 #next: query all table information from sql database and put in datastructure
-foreach my $id (keys %sql) {
-	my $sql_string = $sql{$id}{"query"};
+foreach my $table_id (keys %sql) {
+	my $sql_string = $sql{$table_id}{"query"};
 	$sth = $dbh->prepare($sql_string) or closeDBAndDie("Couldn't prepare statement");
 	$sth->execute() or closeDBAndDie("Couldn't connect to database: ");
 	my @table_data;
 	while (my $hash_ref = $sth->fetchrow_hashref) { 
+		foreach my $myKey (keys %$hash_ref) {
+			#there are some key value pairs which give trouble later, so change undef to empty string, e.g. I have seen strange things such as:
+			# %myHash; $myHash{"myKey"}  = undef;
+			if(!defined($hash_ref->{$myKey})) {
+				$hash_ref->{$myKey} = "";
+			}
+		   die "the code needs to save data in a column called $linkId" if($myKey eq $linkId);
+	    }
 	    push @table_data, $hash_ref;
 	}
-	$sql{$id}{"data"} = \@table_data;
+	$sql{$table_id}{"data"} = \@table_data;
 }
+my %colFilters   = %{$rule{"colFilters"}};
 
+#filter tables and put in new datastructure and make links to original data
+my %sqlDataFiltered;
+my %linkToSql;
 
-# next filter all sql data tables by the rules given in cfg
-# and make unique datastructures
-# hashes contain all the rules from the cfg file
-my %uniq_tos;
-my %uniq_from;
-
-foreach my $ruleCount (sort keys %rule) {
-	#xtract needed data
-	my $relation = $rule{$ruleCount}{"relation"};
-	my $to_id   = $rule{$ruleCount}{"to_id"};
-	my $from_id = $rule{$ruleCount}{"from_id"};
-	my $to_join   = $rule{$ruleCount}{"to_join"};
-	my $from_join = $rule{$ruleCount}{"from_join"};
-	my $embedCol  = $rule{$ruleCount}{"embedCol"};
-	my %colFilters   = %{$rule{$ruleCount}{"colFilters"}};
+#this is only temp for making unique
+my %uniq_data_to_id_temp;
+#the ids to connect to unique values
+my $uniq_id = 0;
+foreach my $table_id (sort keys %sql) {
+	my $filter = $colFilters{$table_id};
+	foreach my $data (@{$sql{$table_id}{"data"}}) {
+	#the filtered hash	
+	   my $data_new   = &copyHash($data, $filter);
+       #store only unique ones and connet to original database table
+	   my $uniq_string = &valuesToString($data_new);
+	   if(!defined($uniq_data_to_id_temp{$uniq_string})) {
+	     	$uniq_data_to_id_temp{$uniq_string} = $uniq_id;
+		    $sqlDataFiltered{$table_id}{$uniq_id} = $data_new;
+		    $uniq_id++;
+	   }
+	   my $id = $uniq_data_to_id_temp{$uniq_string};
+	#link the filtered table data to original table 
+	#
+	   $data->{$linkId} = $id;
+    }
+}
+#test code if filtering worked!
+foreach my $table_id (sort keys %sql) {
+   foreach my $data (@{$sql{$table_id}{"data"}}) {
+	  my $link = $data->{$linkId};
+	  my $data2 = $sqlDataFiltered{$table_id}{$link};
+	  
+	  foreach my $myKey (keys %$data2) {
+		  my $myValue = $data2->{$myKey};
+		  if(!defined($data->{$myKey})) {
+			  die "filtering did not work, key not found '".$myKey."' in original data:\n".Dumper($data);
+		  }
+		  if($data->{$myKey} ne $data2->{$myKey}) {
+			  die "filtering did not work, value differ for key '".$myKey."', original: ".$data->{$myKey}." vs :".$data2->{$myKey};
+		  }
+	  }   
+   }
+}
+#now process all relations and add to each other
+foreach my $relationCount (sort keys %{$rule{"join"}}) {
+	my ($relation, $to_id, $to_join, $from_id, $from_join, $embedCol) = @{$rule{"join"}{$relationCount}};
+    #the table for embedding
+	my @to_table = @{$sql{$to_id}{"data"}};
+	#the table to embed from
+	my @from_table = @{$sql{$from_id}{"data"}};
 	
-	# filter "to" table by colsTo
-	# and make uniq
-	foreach my $to (@{$sql{$from_id}{"data"}}) {
-		#the filtered hash
-		my $filter = $colsFilters
-		my $to_new   = &copyHash($to, $colsTo);
-		#make unique
-		my $value_string = &valuesToString($to_new);
-		if(!defined($uniq_to{$value_string})) {
-			$uniq_to{$ruleCount}{$value_string}{"data"} = $to_new;
-			$uniq_to{$ruleCount}{$value_string}{"embed_to_id"}   = $to_join;
-		}   	
-	}
-	# filter "from" table by colsFrom
-	# and make uniq
-	foreach my $from (@{$sql{$from_id}{"data"}}) {
-		#filter hash
-		my $from_new   = &copyHash($from, $filters{});
-		#make unique
-		my $value_string = &valuesToString($from_new);
-		if(!defined($uniq_from{$value_string})) {
-			$uniq_from{$rule_cnt}{$value_string}{"data"} = $from_new;
-			$uniq_from{$rule_cnt}{$value_string}{"embed_from_id"}   = $from_join;
-		}   	
+	#"join the tables using join rule"
+	foreach my $to_row (@to_table) {
+		foreach my $from_row (@from_table) {
+			if($to_row->{$to_join} eq $from_row->{$from_join}) {
+				# embed the data in our filtered datastructure
+				my $to_filt   = $sqlDataFiltered{$to_id}{$to_row->{$linkId}};
+				my $from_filt = $sqlDataFiltered{$from_id}{$from_row->{$linkId}};
+				#the actual embed line. embed the data to the column named $embedCol
+				$to_filt->{$embedCol} = $from_filt;
+				print "";
+			}
+		}
 	}
 }
-print "";
+# now print out all filtered tables
+foreach my $table_id (sort keys %sqlDataFiltered) {
+	my $file = $outputPath.$table_id.".json";
+	
+	open(FILE, ">", $file) || die "cannot open file $file for writing";
+	my @outData;
+	foreach my $myKeys (sort keys %{$sqlDataFiltered{$table_id}}) {
+		push @outData, $sqlDataFiltered{$table_id}{$myKeys};
+	}
+	print FILE to_json(\@outData);
+	close FILE;
+}
 
+
+
+#now print out results of all rules
+print "";
 
 # ----------subs------------
 #
