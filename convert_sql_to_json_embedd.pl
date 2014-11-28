@@ -76,13 +76,19 @@ open(CONFIGFILE, $ARGV[5]) || die "cannot open input file";
 
 my $line;
 my %sql;
-my %embed;
-my $blockCount = 0; # counter for blocks  (blocks are separated by newline)
-my $embedCount = 0;
-#read in config file
+my %rule;
+my $blockCount = 0;
+my $relationCount = 0; 
+my $ruleCount = 0;
+#first: read in config file
 while($line = <CONFIGFILE>) {
 	if($line =~ /^\n$/) {
 		$blockCount++;
+		$relationCount = 0;
+		#dont start until first rule block has been read in
+		if(defined($rule{$ruleCount}{"filter"})) {
+			$ruleCount++;
+		}
 		next;
 	}
 	$line =~ s/\n//g;
@@ -99,28 +105,24 @@ while($line = <CONFIGFILE>) {
 	}
 	#embedd block
 	elsif($blockCount > 0) {
-		if($line =~ /^(\w+):([_\w]+)$/ && !defined($embed{$embedCount}{"embed_to_id"})) {
-			$embed{$embedCount}{"embed_to_id"} = $1;
-			$embed{$embedCount}{"embed_to_col"} = $2;
+		if($line =~ /^(oneToOne|oneToMany|manyToMany),(\w+):(\w+),(\w+):(\w+),(\w+)$/) {
+			$rule{$ruleCount}{"relation"}{$relationCount} = $1;
+			$rule{$ruleCount}{"to_id"}{$relationCount} = $2;
+			$rule{$ruleCount}{"to_join"}{$relationCount} = $2;
+			$rule{$ruleCount}{"from_id"}{$relationCount} = $3;
+			$rule{$ruleCount}{"from_join"}{$relationCount} = $3;
+			$rule{$ruleCount}{"embedCol"}{$relationCount} = $4;	
+			$relationCount++;
 		}
-		#embed_to always comes before embed_from
-		elsif($line =~ /^(\w+):([_\w]+)$/ && defined($embed{$embedCount}{"embed_to_id"})) {
-			$embed{$embedCount}{"embed_from_id"} = $1;
-			$embed{$embedCount}{"embed_from_col"} = $2;
-		}
-		#TODO: manyToMany not implemented yet
-		elsif($line =~ /^(oneToOne|oneToMany|manyToMany)$/) {
-			$embed{$embedCount}{"relation"} = $1;
-		}
-		elsif($line =~ /^([\w_]+)$/) {
-			$embed{$embedCount}{"columnName"} = $1;
-			$embedCount++;
+
+		if($line =~ /^(\w+)=([_\w]+)$/) {
+			$rule{$ruleCount}{"colFilters"}{$1} = $2;
 		}
 	}
 }
 close CONFIGFILE;
 
-#next query all data tables from sql
+#next: query all table information from sql database and put in datastructure
 foreach my $id (keys %sql) {
 	my $sql_string = $sql{$id}{"query"};
 	$sth = $dbh->prepare($sql_string) or closeDBAndDie("Couldn't prepare statement");
@@ -131,59 +133,95 @@ foreach my $id (keys %sql) {
 	}
 	$sql{$id}{"data"} = \@table_data;
 }
-#last embed stuff (sort i use for better debugging)
-my %embed_hash; # keeps information about embedding while we loop the hash
-foreach my $cnt (sort keys %embed) {
+
+
+# next filter all sql data tables by the rules given in cfg
+# and make unique datastructures
+# hashes contain all the rules from the cfg file
+my %uniq_tos;
+my %uniq_from;
+
+foreach my $ruleCount (sort keys %rule) {
 	#xtract needed data
-	my $relation = $embed{$cnt}{"relation"};
-	my $colName = $embed{$cnt}{"columnName"};
-	my $embed_to_id = $embed{$cnt}{"embed_to_id"};
-	my $embed_to_col = $embed{$cnt}{"embed_to_col"};
-	my $embed_from_id = $embed{$cnt}{"embed_from_id"};
-	my $embed_from_col = $embed{$cnt}{"embed_from_col"};
+	my $relation = $rule{$ruleCount}{"relation"};
+	my $to_id   = $rule{$ruleCount}{"to_id"};
+	my $from_id = $rule{$ruleCount}{"from_id"};
+	my $to_join   = $rule{$ruleCount}{"to_join"};
+	my $from_join = $rule{$ruleCount}{"from_join"};
+	my $embedCol  = $rule{$ruleCount}{"embedCol"};
+	my %colFilters   = %{$rule{$ruleCount}{"colFilters"}};
 	
-	#see if we can "join" the tables for connection/embedding
-	foreach my $to (@{$sql{$embed_to_id}{"data"}}) {
-		my $embed_container = undef;
-		foreach my $from (@{$sql{$embed_from_id}{"data"}}) {
-			if($to->{$embed_to_col} eq $from->{$embed_from_col}) {
-				if($relation eq "oneToOne") { #oneToOne is scalar
-				    $embed_container = $from;
-			    }
-			    elsif($relation eq "oneToMany"){ #oneToMany is array
-			       push @{$embed_container}, $from;
-		        } 
-	        } 
-       }
-#after all is collected in the embed_container we have to embedd it actually in the colname 
-    $to->{$colName} = $embed_container;
-	print "";
-    }
+	# filter "to" table by colsTo
+	# and make uniq
+	foreach my $to (@{$sql{$from_id}{"data"}}) {
+		#the filtered hash
+		my $filter = $colsFilters
+		my $to_new   = &copyHash($to, $colsTo);
+		#make unique
+		my $value_string = &valuesToString($to_new);
+		if(!defined($uniq_to{$value_string})) {
+			$uniq_to{$ruleCount}{$value_string}{"data"} = $to_new;
+			$uniq_to{$ruleCount}{$value_string}{"embed_to_id"}   = $to_join;
+		}   	
+	}
+	# filter "from" table by colsFrom
+	# and make uniq
+	foreach my $from (@{$sql{$from_id}{"data"}}) {
+		#filter hash
+		my $from_new   = &copyHash($from, $filters{});
+		#make unique
+		my $value_string = &valuesToString($from_new);
+		if(!defined($uniq_from{$value_string})) {
+			$uniq_from{$rule_cnt}{$value_string}{"data"} = $from_new;
+			$uniq_from{$rule_cnt}{$value_string}{"embed_from_id"}   = $from_join;
+		}   	
+	}
 }
+print "";
 
 
-foreach my $id (sort keys %sql) {
-	my $data = $sql{$id}{"data"};
-	my $file = $ARGV[6]."/".$id.".json";
-	open(OUT, ">", $file) || die "cannot open file to write $file";
-	print OUT to_json($data);
-	close(OUT);
-	print STDOUT "wrote output file $file\n";
-}
-
-
-#while (my @arr = $sth->fetchrow_array) {
-#    print $out_handle to_json(\@arr);
-#}
-
-$dbh->disconnect;
-
-
-
+# ----------subs------------
+#
 #sub to close the database handle
 sub closeDBAndDie {
 my $param = $_[0];
 my $dbh = $_[1];
 $dbh->disconnect or warn $dbh->errstr;
 die $param;
+}
+sub valuesToString {
+	my $hashRef = $_[0];
+	my $returnValue = "";
+	foreach my $myKey (sort keys %$hashRef) {
+		$returnValue.="_".$hashRef->{$myKey} || "";
+	}
+	return $returnValue;
+}
+sub copyHash {
+	my $hashRef    = $_[0];
+	my $colsToCopy = $_[1];
+	
+	my @cols;
+	if($colsToCopy eq "*") {
+	   @cols = keys %$hashRef;	
+	}
+	else {
+	   @cols = split(",", $colsToCopy);	
+	}
+	my %return_hash;
+	foreach my $col (@cols) {
+		$return_hash{$col} = $hashRef->{$col} || "";
+	}
+	return \%return_hash;
+}
+sub uniqArrOfHash {
+	my $arrRef    = $_[0];
+	my %uniqVals;
+	foreach my $el (@$arrRef) {
+		my $uniqString = valuesToString($el);
+		if(!defined($uniqVals{$uniqString})) {
+			$uniqVals{$uniqString} = $el;
+		}
+	}
+	return values %uniqVals;
 }
