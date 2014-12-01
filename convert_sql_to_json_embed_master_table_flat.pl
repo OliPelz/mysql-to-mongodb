@@ -1,14 +1,17 @@
 #!/usr/bin/perl
 
 
-#TODO: overhaul description here. In short: this script is for embedding data between multiple tables. every table can be an embedded data structure of multiple other embedded data tables. therefore the memory footprint is huge because everything gets processed in memory. use this script only if you have multiple tables which should be embededed with each other. if you have the typical one master table and a number of flat (unembedded single tables -> hashes without further references to other tables) use the faster script convert_sql_to_json_embed_master_table_flat.pl instead
-#TODO2: add parameter bin obj where you can load a binary data structure object containing the data from sql and filtering for reruning the script/debugging
+#TODO: overhaul description here. 
+#In short: use this script if you have ONE master table you want to embed some flat tables (flat table = table which has no references to other tables. in perl this means a hash with only scalar values!). This is a fast script. If you have to embedd multiple tables in each other use convert_sql_to_json_embed.pl instead (much slower - big memory footprint!)
+
+# Note: first line in the config file is defined as the master table
 use DBI;
 use DBD::mysql;
 use JSON;
 use strict;
 use warnings;
 use Data::Dumper;
+use File::Temp;
 
 # we generate a column in every data table, we need to make it unique by using time
 # because it must not be available as a column in the original sql table
@@ -91,10 +94,13 @@ open(CONFIGFILE, $ARGV[5]) || die "cannot open input file";
 my $line;
 my %sql;
 my %rule;
+my $lineCnt = 0;
 my $blockCount = 0;
 my $relationCount = 0; 
+my $masterTableId;
 #first: read in config file
 while($line = <CONFIGFILE>) {
+	$lineCnt++;
 	if($line =~ /^\n$/) {
 		$blockCount++;
 		next;
@@ -109,6 +115,9 @@ while($line = <CONFIGFILE>) {
 				die "unique ids are non-unique, there are several sql lines with same identifier : $id";
 			}
 			$sql{$id}{"query"} = $sql_statement;
+			if($lineCnt == 1) {
+			    $masterTableId = $id;
+			}
 		}
 	}
 	#embedd block
@@ -150,6 +159,7 @@ foreach my $table_id (keys %sql) {
 }
 print STDERR "...done\n";
 my $cnt;
+my $size;
 my %colFilters   = %{$rule{"colFilters"}};
 
 #filter tables and put in new datastructure and make links to original data
@@ -164,7 +174,7 @@ print STDERR "started filtering tables\n";
 foreach my $table_id (sort keys %sql) {
 	my $filter = $colFilters{$table_id};
 	$cnt = 0;
-	my $size = scalar(@{$sql{$table_id}{"data"}});
+	$size = scalar(@{$sql{$table_id}{"data"}});
 	foreach my $data (@{$sql{$table_id}{"data"}}) {
 	#the filtered hash	
 	   my $data_new   = &copyHash($data, $filter);
@@ -193,7 +203,7 @@ foreach my $table_id (sort keys %sql) {
 	  my $link = $data->{$linkId};
 	  my $data2 = $sqlDataFiltered{$table_id}{$link};
 	  $cnt = 0;
-   	  my $size = scalar(@{$sql{$table_id}{"data"}});
+   	  $size = scalar(@{$sql{$table_id}{"data"}});
 	  foreach my $myKey (keys %$data2) {
 		  my $myValue = $data2->{$myKey};
 		  if(!defined($data->{$myKey})) {
@@ -210,25 +220,35 @@ foreach my $table_id (sort keys %sql) {
 }
 print STDERR "...done\n";
 
-print STDERR "started actual embedding procedure\n";
+&saveSqlObj(\%sql);
+
+print STDERR "started actual embedding and print out procedure\n";
 #now process all relations and add to each other
-foreach my $relationCount (sort keys %{$rule{"join"}}) {
-	my @singleRule = @{$rule{"join"}{$relationCount}};
-	my ($relation, $to_id, $to_join, $from_id, $from_join, $embedCol) = @singleRule;
-    #the table for embedding
-	my @to_table = @{$sql{$to_id}{"data"}};
-	#the table to embed from
-	my @from_table = @{$sql{$from_id}{"data"}};
-	print STDERR "started embedding rule ".join(" ",@singleRule)."\n";
-	#"join the tables using join rule"
-	foreach my $to_row (@to_table) {
+my @master_table = @{$sql{$masterTableId}{"data"}};
+my $file = $outputPath.$masterTableId.".json";
+open(FILE, ">", $file) || die "cannot open file $file for writing";
+print FILE "[";
+my $entryCount = 0;
+$cnt = 0;
+$size = scalar @master_table;
+#for every row in the master table
+foreach my $to_row (@master_table) {
+	my $to_filt   = $sqlDataFiltered{$masterTableId}{$to_row->{$linkId}};
+	
+   if($entryCount++ > 0) {
+      print FILE ",";  # we build our own json arr, so we need to introduce commas for our object serperation
+   }
+	#for every relation embedding rule
+	foreach my $relationCount (sort keys %{$rule{"join"}}) {
+		my @singleRule = @{$rule{"join"}{$relationCount}};
+		my ($relation, $dummy, $to_join, $from_id, $from_join, $embedCol) = @singleRule;
+		my @from_table = @{$sql{$from_id}{"data"}};
+		#for every row in the relation
+		my $found = 0;
 		my $embedString;
 		my @embedArr;
-		my $found = 0;
-		my $to_filt   = $sqlDataFiltered{$to_id}{$to_row->{$linkId}};
-		$cnt = 0;
-		my $size = scalar(@from_table);
 		foreach my $from_row (@from_table) {
+			#if we can embed by given id
 			if($to_row->{$to_join} eq $from_row->{$from_join}) {
 				$found = 1;
 				# embed the data in our filtered datastructure
@@ -242,7 +262,6 @@ foreach my $relationCount (sort keys %{$rule{"join"}}) {
 					push @embedArr, $from_filt;
 				}
 			}
-	   	    print STDERR "trying to embed $cnt / $size record\n" if($DEBUG && $cnt++%$DEBUG_REC == 0);	
 		}
 		if($found) {
 		   if($relation eq "oneToOne") {
@@ -250,27 +269,15 @@ foreach my $relationCount (sort keys %{$rule{"join"}}) {
 	       }
 		   elsif($relation eq "oneToMany") {  #make array
 			   $to_filt->{$embedCol} = \@embedArr;
-		    }
-		}
-	}
-	print STDERR "done embedding rule relationCount $relationCount\n";
+		   }
+	    }
+  	   print STDERR "printing output record from mastertable no $cnt / $size \n" if($DEBUG && $cnt++%$DEBUG_REC == 0);
+	   print FILE to_json($to_filt);
+    }
 }
-print STDERR "...done\n";
-
-print STDERR "done processing, now printing out to files\n";
-# now print out all filtered tables
-foreach my $table_id (sort keys %sqlDataFiltered) {
-	my $file = $outputPath.$table_id.".json";
-	
-	open(FILE, ">", $file) || die "cannot open file $file for writing";
-        print FILE "[";
-	foreach my $myKeys (sort keys %{$sqlDataFiltered{$table_id}}) {
-		print FILE to_json($sqlDataFiltered{$table_id}{$myKeys});
-	}
-	print STDERR "generated output file $file\n";
-        print FILE "]";
-	close FILE;
-}
+print STDERR "generated output file $file\n";
+print FILE "]";
+close FILE;
 
 
 
@@ -321,4 +328,23 @@ sub uniqArrOfHash {
 		}
 	}
 	return values %uniqVals;
+}
+sub saveSqlObj{
+	my $dataStruct = $_[0];
+    my ($fh, $filename) = tempfile(time() . "_" . rand().".bin", DIR => `pwd`, UNLINK => 0); 
+    print("storing sql datastruct\n");
+    store($dataStruct, $filename);
+    print("end of storing sql datastruct, created file $filename\n");
+}
+sub loadObj {
+  my $file = $_[0];
+  my $ref = retrieve($file);
+  return $ref;
+}
+sub loadData {
+  my $file = $_[0];
+  my $arrref = &loadObj($file);
+#restore to global variables
+ return $arrref; 
+ 
 }
