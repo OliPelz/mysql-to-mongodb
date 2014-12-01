@@ -297,19 +297,30 @@ sub valuesToString {
 sub copyHash {
 	my $hashRef    = $_[0];
 	my $colsToCopy = $_[1];
+	my $exclude    = $_[2];
 	
+	my @excludes = split(",", $exclude);
 	my @cols;
+	my $returnHashRef;
 	if($colsToCopy eq "*") {
-	   return $hashRef;
-	   #@cols = keys %$hashRef;	
+	   @cols = keys %$hashRef;	
 	}
 	else {
-		my %return_hash;
-		@cols = split(",", $colsToCopy);
-		foreach my $col (@cols) {
-			$return_hash{$col} = $hashRef->{$col};
-		}
+	   @cols = split(",", $colsToCopy);
 	}
+	
+    foreach my $col (@cols) {
+		my $found = 0;
+		foreach my $exc (@excludes){
+			if($col eq $exc) {
+				$found = 1;
+			}
+		}
+		if(!$found) {
+    	   $returnHashRef->{$col} = $hashRef->{$col};
+		}
+    }
+	return $returnHashRef;
 }
 sub uniqArrOfHash {
 	my $arrRef    = $_[0];
