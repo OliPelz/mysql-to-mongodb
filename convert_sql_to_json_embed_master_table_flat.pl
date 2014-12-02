@@ -264,19 +264,15 @@ else {
     print("end of reading sql datastruct, created hashes \%sql and \%sqlDataFiltered \n");
 }
 print STDERR "started actual embedding and print out procedure\n";
-#now process all relations and add to each other
+#now embedd all "sub" tables to our master table
 my @master_table = @{$sql{$masterTableId}{"data"}};
 
-my $entryCount = 0;
 $cnt = 0;
 $size = scalar @master_table;
 #for every row in the master table
 foreach my $to_row (@master_table) {
 	my $to_filt   = $sqlDataFiltered{$masterTableId}{$to_row->{$linkId}};
 	
-   if($entryCount++ > 0) {
-      #print FILE ",";  # we build our own json arr, so we need to introduce commas for our object serperation
-   }
    #for every relation embedding rule
    foreach my $relationCount (sort keys %{$rule{"join"}}) {
 		my ($relation, $dummy, $to_join, $from_id, $from_join, $embedCol) = @{$rule{"join"}{$relationCount}};

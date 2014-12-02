@@ -1,15 +1,19 @@
 #!/usr/bin/perl
 
 
-#TODO: overhaul description here. In short: this script is for embedding data between multiple tables. every table can be an embedded data structure of multiple other embedded data tables. therefore the memory footprint is huge because everything gets processed in memory. use this script only if you have multiple tables which should be embededed with each other. if you have the typical one master table and a number of flat (unembedded single tables -> hashes without further references to other tables) use the faster script convert_sql_to_json_embed_master_table_flat.pl instead
-#TODO2: add parameter bin obj where you can load a binary data structure object containing the data from sql and filtering for reruning the script/debugging
+#TODO: overhaul description here. 
+#In short: use this script we can embedd multiple tables in each other  this is much slower and has bigget memory footprint! than the master-flat script
+
+# Note: first line in the config file is defined as the master table
 use DBI;
 use DBD::mysql;
 use JSON;
 use strict;
 use warnings;
 use Data::Dumper;
+use Storable;
 
+ 
 # we generate a column in every data table, we need to make it unique by using time
 # because it must not be available as a column in the original sql table
 my $linkId = "__Link_Id__".time;
@@ -93,13 +97,22 @@ my %sql;
 my %rule;
 my $blockCount = 0;
 my $relationCount = 0; 
+my $cnt;
+my $size;
+my %sqlDataFiltered;
+my %fromLookupTable;
+
+
 #first: read in config file
 while($line = <CONFIGFILE>) {
+	
 	if($line =~ /^\n$/) {
 		$blockCount++;
 		next;
 	}
 	$line =~ s/\n//g;
+	$line =~ s/^\s+//g;
+	$line =~ s/\s+$//g;
 	# sql block
 	if($blockCount == 0) {  
 		if($line =~ /^(\w+):"([^"]+)"$/) {
@@ -109,6 +122,7 @@ while($line = <CONFIGFILE>) {
 				die "unique ids are non-unique, there are several sql lines with same identifier : $id";
 			}
 			$sql{$id}{"query"} = $sql_statement;
+			
 		}
 	}
 	#embedd block
@@ -126,156 +140,165 @@ while($line = <CONFIGFILE>) {
 close CONFIGFILE;
 die "no sql statements could be read from the cfg fie" if(scalar keys %sql == 0);
 
-print STDERR "started quering sql database\n";
-#next: query all table information from sql database and put in datastructure
-foreach my $table_id (keys %sql) {
-	my $sql_string = $sql{$table_id}{"query"};
-	$sth = $dbh->prepare($sql_string) or closeDBAndDie("Couldn't prepare statement");
-	$sth->execute() or closeDBAndDie("Couldn't connect to database: ");
-	my @table_data;
-	while (my $hash_ref = $sth->fetchrow_hashref) { 
-		foreach my $myKey (keys %$hash_ref) {
-			#there are some key value pairs which give trouble later, so change undef to empty string, e.g. I have seen strange things such as:
-			# %myHash; $myHash{"myKey"}  = undef;
-			if(!defined($hash_ref->{$myKey})) {
-				$hash_ref->{$myKey} = "";
+if(!defined($ARGV[7])) {
+	print STDERR "started quering sql database\n";
+	#next: query all table information from sql database and put in datastructure
+	foreach my $table_id (keys %sql) {
+		my $sql_string = $sql{$table_id}{"query"};
+		$sth = $dbh->prepare($sql_string) or closeDBAndDie("Couldn't prepare statement");
+		$sth->execute() or closeDBAndDie("Couldn't connect to database: ");
+		my @table_data;
+		while (my $hash_ref = $sth->fetchrow_hashref) { 
+			foreach my $myKey (keys %$hash_ref) {
+				#there are some key value pairs which give trouble later, so change undef to empty string, e.g. I have seen strange things such as:
+				# %myHash; $myHash{"myKey"}  = undef;
+				if(!defined($hash_ref->{$myKey})) {
+					$hash_ref->{$myKey} = "";
+				}
+				die "the code needs to save data in a column called $linkId" if($myKey eq $linkId);
 			}
-		   die "the code needs to save data in a column called $linkId" if($myKey eq $linkId);
-	    }
-	    push @table_data, $hash_ref;
+			push @table_data, $hash_ref;
+		}
+		print STDERR scalar(@table_data)." records returned from sql query id ".$table_id."\n" if($table_id);
+		print STDERR "done querying sql database for sql id ".$table_id."\n";
+		$sql{$table_id}{"data"} = \@table_data;
 	}
-	print STDERR scalar(@table_data)." records returned from sql query id ".$table_id."\n" if($table_id);
-	print STDERR "done querying sql database for sql id ".$table_id."\n";
-	$sql{$table_id}{"data"} = \@table_data;
-}
-print STDERR "...done\n";
-my $cnt;
-my %colFilters   = %{$rule{"colFilters"}};
+	print STDERR "...done\n";
+	
+	my %colFilters   = %{$rule{"colFilters"}};
 
-#filter tables and put in new datastructure and make links to original data
-my %sqlDataFiltered;
-my %linkToSql;
+	#filter tables and put in new datastructure and make links to original data
+	my %linkToSql;
 
-#this is only temp for making unique
-my %uniq_data_to_id_temp;
-#the ids to connect to unique values
-my $uniq_id = 0;
-print STDERR "started filtering tables\n";
-foreach my $table_id (sort keys %sql) {
-	my $filter = $colFilters{$table_id};
-	$cnt = 0;
-	my $size = scalar(@{$sql{$table_id}{"data"}});
-	foreach my $data (@{$sql{$table_id}{"data"}}) {
-	#the filtered hash	
-	   my $data_new   = &copyHash($data, $filter);
-       #store only unique ones and connet to original database table
-	   my $uniq_string = &valuesToString($data_new);
-	   if(!defined($uniq_data_to_id_temp{$uniq_string})) {
-	     	$uniq_data_to_id_temp{$uniq_string} = $uniq_id;
-		    $sqlDataFiltered{$table_id}{$uniq_id} = $data_new;
-		    $uniq_id++;
-	   }
-	   my $id = $uniq_data_to_id_temp{$uniq_string};
-	#link the filtered table data to original table 
-	#
-	   $data->{$linkId} = $id;
-   	   print STDERR $table_id." filtering record no $cnt / $size \n" if($DEBUG && $cnt++%$DEBUG_REC == 0);
+	#this is only temp for making unique
+	my %uniq_data_to_id_temp;
+	#the ids to connect to unique values
+	my $uniq_id = 0;
+	print STDERR "started filtering tables\n";
+	foreach my $table_id (sort keys %sql) {
+		my $filter = $colFilters{$table_id};
+		$cnt = 0;
+		$size = scalar(@{$sql{$table_id}{"data"}});
+		foreach my $data (@{$sql{$table_id}{"data"}}) {
+			#the filtered hash	
+			my $data_new   = &copyHash($data, $filter, $linkId);
+			#store only unique ones and connet to original database table
+			my $uniq_string = &valuesToString($data_new);
+			if(!defined($uniq_data_to_id_temp{$uniq_string})) {
+				$uniq_data_to_id_temp{$uniq_string} = $uniq_id;
+				$sqlDataFiltered{$table_id}{$uniq_id} = $data_new;
+				$uniq_id++;
+			}
+			my $id = $uniq_data_to_id_temp{$uniq_string};
+			#link the filtered table data to original table 
+			#
+			$data->{$linkId} = $id;
+			print STDERR $table_id." filtering record no $cnt / $size \n" if($DEBUG && $cnt++%$DEBUG_REC == 0);
 	   
-    }
-	print STDERR "filtering table ".$table_id." done\n";
-}
-print STDERR "...done\n";
+		}
+		print STDERR "filtering table ".$table_id." done\n";
+	}
+	print STDERR "...done\n";
 
-print STDERR "started validating filtering\n";
-#test code if filtering worked!
-foreach my $table_id (sort keys %sql) {
-   foreach my $data (@{$sql{$table_id}{"data"}}) {
-	  my $link = $data->{$linkId};
-	  my $data2 = $sqlDataFiltered{$table_id}{$link};
-	  $cnt = 0;
-   	  my $size = scalar(@{$sql{$table_id}{"data"}});
-	  foreach my $myKey (keys %$data2) {
-		  my $myValue = $data2->{$myKey};
-		  if(!defined($data->{$myKey})) {
-			  die "filtering did not work, key not found '".$myKey."' in original data:\n".Dumper($data);
-		  }
-		  if($data->{$myKey} ne $data2->{$myKey}) {
-			  die "filtering did not work, value differ for key '".$myKey."', original: ".$data->{$myKey}." vs :".$data2->{$myKey};
-		  }
-	  } 
-  	   print STDERR $table_id." validating record no $cnt / $size \n" if($DEBUG && $cnt++%$DEBUG_REC == 0);
+	print STDERR "started validating filtering\n";
+	#test code if filtering worked!
+	foreach my $table_id (sort keys %sql) {
+		$cnt = 0;
+		foreach my $data (@{$sql{$table_id}{"data"}}) {
+			my $link = $data->{$linkId};
+			my $data2 = $sqlDataFiltered{$table_id}{$link};
+			$size = scalar(@{$sql{$table_id}{"data"}});
+			foreach my $myKey (keys %$data2) {
+				my $myValue = $data2->{$myKey};
+				if(!defined($data->{$myKey})) {
+					die "filtering did not work, key not found '".$myKey."' in original data:\n".Dumper($data);
+				}
+				if($data->{$myKey} ne $data2->{$myKey}) {
+					die "filtering did not work, value differ for key '".$myKey."', original: ".$data->{$myKey}." vs :".$data2->{$myKey};
+				}
+			} 
+			print STDERR $table_id." validating record no $cnt / $size \n" if($DEBUG && $cnt++%$DEBUG_REC == 0);
 	  
-   }
- 	print STDERR "validating filtering of table ".$table_id." done\n"; 
+		}
+		print STDERR "validating filtering of table ".$table_id." done\n"; 
+	}
+	print STDERR "...done\n";
+    
+	#building lookup table for fast querying with $from_join column later
+	print STDERR "started building lookup table\n";
+	foreach my $relationCount (sort keys %{$rule{"join"}}) {
+		my @singleRule = @{$rule{"join"}{$relationCount}};
+		my ($relation, $to_id, $to_join, $from_id, $from_join, $embedCol) = @singleRule;
+	    #the table for embedding
+		#my @to_table = @{$sql{$to_id}{"data"}};
+		#the table to embed from
+		my @from_table = @{$sql{$from_id}{"data"}};
+		print STDERR "building lookup table for rule $relationCount\n";
+		$cnt = 0;
+		$size = scalar @from_table;
+		#"join the tables using join rule"
+		foreach my $from_row (@from_table) {
+			my $from_filt = $sqlDataFiltered{$from_id}{$from_row->{$linkId}};
+			if($relation eq "oneToOne") {
+				$fromLookupTable{$relationCount}{$from_row->{$from_join}} = $from_filt;
+			}
+			elsif($relation eq "oneToMany") { #make array
+			    push @{$fromLookupTable{$relationCount}{$from_row->{$from_join}}}, $from_filt;
+		    }			
+			print STDERR  "lookup table record no $cnt / $size \n" if($DEBUG && $cnt++%$DEBUG_REC == 0);
+		}	
+	}
+	
+	print("storing sql datastruct\n");
+	my $filename = &saveSqlObj([$linkId, \%fromLookupTable, \%sql, \%sqlDataFiltered], $outputPath);
+    print("end of storing sql datastruct, created file $filename\n");
 }
-print STDERR "...done\n";
+# if ARGV[7] is defined this is a preprocessed and persisted completed sql data structure from a former run 
+else {
+    print("reading from sql datastruct\n");
+	my ($linkIdObj, $fromLookupTableObj, $sqlObj, $sqlDataFilteredObj) = @{&loadSqlObj($ARGV[7])};
+	$linkId = $linkIdObj;
+	%fromLookupTable = %{$fromLookupTableObj};
+	%sql = %{$sqlObj};
+	%sqlDataFiltered = %{$sqlDataFilteredObj};
+    print("end of reading sql datastruct, created hashes \%sql and \%sqlDataFiltered \n");
+}
+print STDERR "started actual embedding and print out procedure\n";
+#now process all relations and emed each other
 
-print STDERR "started actual embedding procedure\n";
-#now process all relations and add to each other
+#for all relations: embed every "from" table to the "to" table
 foreach my $relationCount (sort keys %{$rule{"join"}}) {
 	my @singleRule = @{$rule{"join"}{$relationCount}};
 	my ($relation, $to_id, $to_join, $from_id, $from_join, $embedCol) = @singleRule;
-    #the table for embedding
+	#the table for embedding
 	my @to_table = @{$sql{$to_id}{"data"}};
 	#the table to embed from
 	my @from_table = @{$sql{$from_id}{"data"}};
-	print STDERR "started embedding rule ".join(" ",@singleRule)."\n";
-	#"join the tables using join rule"
+	#for every row in the master table
 	foreach my $to_row (@to_table) {
-		my $embedString;
-		my @embedArr;
-		my $found = 0;
 		my $to_filt   = $sqlDataFiltered{$to_id}{$to_row->{$linkId}};
-		$cnt = 0;
-		my $size = scalar(@from_table);
-		foreach my $from_row (@from_table) {
-			if($to_row->{$to_join} eq $from_row->{$from_join}) {
-				$found = 1;
-				# embed the data in our filtered datastructure
-				my $from_filt = $sqlDataFiltered{$from_id}{$from_row->{$linkId}};
-				
-				#the actual embed line. embed the data to the column named $embedCol
-				if($relation eq "oneToOne") {
-				   $embedString = $from_filt;
-			    }
-				elsif($relation eq "oneToMany") {  #make array
-					push @embedArr, $from_filt;
-				}
-			}
-	   	    print STDERR "trying to embed $cnt / $size record\n" if($DEBUG && $cnt++%$DEBUG_REC == 0);	
-		}
-		if($found) {
-		   if($relation eq "oneToOne") {
-		      $to_filt->{$embedCol} = $embedString;
-	       }
-		   elsif($relation eq "oneToMany") {  #make array
-			   $to_filt->{$embedCol} = \@embedArr;
-		    }
-		}
+		$to_filt->{$embedCol} = $fromLookupTable{$relationCount}{$to_row->{$to_join}};
 	}
-	print STDERR "done embedding rule relationCount $relationCount\n";
+    print STDERR "embedding record from mastertable no $cnt / $size \n" if($DEBUG && $cnt++%$DEBUG_REC == 0);
 }
 print STDERR "...done\n";
 
-print STDERR "done processing, now printing out to files\n";
+print STDERR "done processing, now printing out to the mastertable file\n";
 # now print out all filtered tables
+
 foreach my $table_id (sort keys %sqlDataFiltered) {
-	my $file = $outputPath.$table_id.".json";
-	
-	open(FILE, ">", $file) || die "cannot open file $file for writing";
-        print FILE "[";
-	foreach my $myKeys (sort keys %{$sqlDataFiltered{$table_id}}) {
-		print FILE to_json($sqlDataFiltered{$table_id}{$myKeys});
-	}
-	print STDERR "generated output file $file\n";
-        print FILE "]";
-	close FILE;
+    my $file = $outputPath.$table_id.".json";
+    open(FILE, ">", $file) || die "cannot open file $file for writing";
+    print FILE "[";
+    foreach my $myKeys (sort keys %{$sqlDataFiltered{$table_id}}) {
+        print FILE to_json($sqlDataFiltered{$table_id}{$myKeys});
+    }
+    print STDERR "generated output file $file\n";
+    print FILE "]";
+    close FILE;
 }
 
 
-
-#now print out results of all rules
-print "";
 
 # ----------subs------------
 #
@@ -332,4 +355,16 @@ sub uniqArrOfHash {
 		}
 	}
 	return values %uniqVals;
+}
+sub saveSqlObj{
+	my $dataStruct = $_[0];
+	my $outputPath = $_[1];
+    my $filename = $outputPath.time() . "_" . rand().".bin"; 
+    store($dataStruct, $filename);
+	return $filename;
+}
+sub loadSqlObj {
+  my $file = $_[0];
+  my $ref = retrieve($file);
+  return $ref;
 }
