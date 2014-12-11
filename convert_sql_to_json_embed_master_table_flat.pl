@@ -137,8 +137,11 @@ while($line = <CONFIGFILE>) {
 			$relationCount++;
 		}
 
-		if($line =~ /^(\w+)=([_\w\*,]+)$/) {
+		if($line =~ /^(\w+)=([_\w\*,]+)(\[asArray\])?$/) {
 			$rule{"colFilters"}{$1} = $2;
+			if(defined($3)) {
+				$rule{"asArray"}{$1} = 1;
+			}
 		}
 	}
 }
@@ -154,7 +157,7 @@ if(!defined($ARGV[7])) {
 		$sth->execute() or closeDBAndDie("Couldn't connect to database: ");
 		my @table_data;
 		while (my $hash_ref = $sth->fetchrow_hashref) { 
-			foreach my $myKey (keys %$hash_ref) {
+			foreach my $myKey (keys %$hash_ref) { 
 				#there are some key value pairs which give trouble later, so change undef to empty string, e.g. I have seen strange things such as:
 				# %myHash; $myHash{"myKey"}  = undef;
 				if(!defined($hash_ref->{$myKey})) {
@@ -276,7 +279,24 @@ foreach my $to_row (@master_table) {
    #for every relation embedding rule
    foreach my $relationCount (sort keys %{$rule{"join"}}) {
 		my ($relation, $dummy, $to_join, $from_id, $from_join, $embedCol) = @{$rule{"join"}{$relationCount}};
-		$to_filt->{$embedCol} = $fromLookupTable{$relationCount}{$to_row->{$to_join}};
+		
+		#if we define the from_id as array dont print hash but print it as an array 
+		#this only makes sense if we have single key hashes e.g. {phenoName : "ABC"} -> (ABC)
+		#otherwise you cannot distinguish
+		if($rule{"asArray"}{$from_id}) {
+			my %uniqNames;
+			foreach my $hsh_ref (@{$fromLookupTable{$relationCount}{$to_row->{$to_join}}}) {
+				foreach my $val (values %$hsh_ref) {
+					$uniqNames{$val} = 1;
+				}
+			}
+			my @arr = keys %uniqNames;
+			$to_filt->{$embedCol} = \@arr;
+		}
+		else {
+		   $to_filt->{$embedCol} = $fromLookupTable{$relationCount}{$to_row->{$to_join}};
+		}
+		
     }
     print STDERR "embedding record from mastertable no $cnt / $size \n" if($DEBUG && $cnt++%$DEBUG_REC == 0);
 }
@@ -291,6 +311,7 @@ my @vals = values %{$sqlDataFiltered{$masterTableId}};
 print FILE to_json(\@vals);
 print STDERR "generated output file $file\n";
 close FILE;
+
 
 #print FILE "]";
 #close FILE;
